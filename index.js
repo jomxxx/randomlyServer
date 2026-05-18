@@ -10,8 +10,8 @@ const io = new Server(server, {
   cors: { origin: "*" },
 });
 
-const maleQueue = []; // sockets whose own gender === 'male' and are waiting
-const femaleQueue = []; // sockets whose own gender === 'female' and are waiting
+const maleQueue = [];
+const femaleQueue = [];
 
 // ===== SECURITY & ANTI-ABUSE TRACKING =====
 const ipConnectionMap = new Map(); // IP -> { count, lastConnection }
@@ -136,62 +136,41 @@ setInterval(() => {
  * This will repeatedly create rooms while both queues have members.
  */
 function matchQueues() {
-  // Match users by their own gender queues (maleQueue vs femaleQueue)
-  // Only create a room when both participants mutually accept the other's gender
-  let i = 0;
-  while (i < maleQueue.length) {
-    const aId = maleQueue[i];
+  while (maleQueue.length > 0 && femaleQueue.length > 0) {
+    const aId = maleQueue.shift();
+    const bId = femaleQueue.shift();
+    console.log(`[matchQueues] pairing ${aId} (male) with ${bId} (female)`);
     const a = io.sockets.sockets.get(aId);
-    if (!a) {
-      maleQueue.splice(i, 1);
+    const b = io.sockets.sockets.get(bId);
+    if (!a || !b) {
+      // If either socket is gone, skip and continue
+      if (a) {
+        // requeue a
+        removeFromQueue(maleQueue, aId);
+        maleQueue.push(aId);
+      }
+      if (b) {
+        removeFromQueue(femaleQueue, bId);
+        femaleQueue.push(bId);
+      }
       continue;
     }
-
-    let matched = false;
-    for (let j = 0; j < femaleQueue.length; j++) {
-      const bId = femaleQueue[j];
-      const b = io.sockets.sockets.get(bId);
-      if (!b) {
-        femaleQueue.splice(j, 1);
-        j--;
-        continue;
-      }
-
-      const aWant = a.data && a.data.want ? a.data.want : "any"; // a is male
-      const bWant = b.data && b.data.want ? b.data.want : "any"; // b is female
-
-      const aAcceptsB = aWant === "any" || aWant === "female";
-      const bAcceptsA = bWant === "any" || bWant === "male";
-
-      if (aAcceptsB && bAcceptsA) {
-        // remove matched entries
-        maleQueue.splice(i, 1);
-        femaleQueue.splice(j, 1);
-        createRoom(a, b);
-        matched = true;
-        break;
-      }
-    }
-
-    if (!matched) i++;
+    createRoom(a, b);
   }
 }
 
 function enqueue(socket) {
   if (!socket || !socket.data || !socket.data.gender) return;
   const id = socket.id;
-  // ensure no duplicates
-  removeFromQueue(maleQueue, id);
-  removeFromQueue(femaleQueue, id);
-
   if (socket.data.gender === "male") {
-    maleQueue.push(id);
+    if (!maleQueue.includes(id)) maleQueue.push(id);
   } else {
-    femaleQueue.push(id);
+    if (!femaleQueue.includes(id)) femaleQueue.push(id);
   }
-
   socket.data.lastMatchRequest = Date.now();
-  console.log(`[enqueue] ${id} (gender=${socket.data.gender}, want=${socket.data.want}) queued. male=${maleQueue.length} female=${femaleQueue.length}`);
+  console.log(
+    `[enqueue] ${id} (${socket.data.gender}) queued. male=${maleQueue.length} female=${femaleQueue.length}`,
+  );
   socket.emit("waiting");
 }
 
@@ -320,7 +299,7 @@ io.on("connection", (socket) => {
   updateActivity(socket);
   socket.onAny(() => updateActivity(socket));
 
-  socket.on("join", ({ gender, avatar, want }) => {
+  socket.on("join", ({ gender, avatar }) => {
     updateActivity(socket);
     const ip = getClientIp(socket);
     if (isIpBlocked(ip)) {
@@ -347,7 +326,6 @@ io.on("connection", (socket) => {
 
     socket.data.hasJoined = true;
     socket.data.gender = gender === "female" ? "female" : "male";
-    socket.data.want = want === "female" ? "female" : want === "male" ? "male" : "any";
     socket.data.avatar = avatar || null;
     // centralize matching logic
     tryMatch(socket);
