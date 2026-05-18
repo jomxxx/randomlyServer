@@ -10,9 +10,8 @@ const io = new Server(server, {
   cors: { origin: "*" },
 });
 
-const maleQueue = []; // users who want to be matched with male
-const femaleQueue = []; // users who want to be matched with female
-const anyQueue = []; // users who accept any
+const maleQueue = []; // sockets whose own gender === 'male' and are waiting
+const femaleQueue = []; // sockets whose own gender === 'female' and are waiting
 
 // ===== SECURITY & ANTI-ABUSE TRACKING =====
 const ipConnectionMap = new Map(); // IP -> { count, lastConnection }
@@ -137,71 +136,62 @@ setInterval(() => {
  * This will repeatedly create rooms while both queues have members.
  */
 function matchQueues() {
-  // Priority matching:
-  // 1) want-male with want-female (complementary)
-  // 2) want-male with any
-  // 3) want-female with any
-  // 4) any with any
-
-  // helper to pop two ids from their queues and create room
-  const tryPair = (qA, qB) => {
-    while (qA.length > 0 && qB.length > 0) {
-      const aId = qA.shift();
-      const bId = qB.shift();
-      const a = io.sockets.sockets.get(aId);
-      const b = io.sockets.sockets.get(bId);
-      if (!a || !b) {
-        if (a) qA.push(aId);
-        if (b) qB.push(bId);
-        continue;
-      }
-      createRoom(a, b);
-    }
-  };
-
-  // 1) male-want with female-want
-  tryPair(maleQueue, femaleQueue);
-
-  // 2) male-want with any
-  tryPair(maleQueue, anyQueue);
-
-  // 3) female-want with any
-  tryPair(femaleQueue, anyQueue);
-
-  // 4) any with any (pair off)
-  while (anyQueue.length > 1) {
-    const aId = anyQueue.shift();
-    const bId = anyQueue.shift();
+  // Match users by their own gender queues (maleQueue vs femaleQueue)
+  // Only create a room when both participants mutually accept the other's gender
+  let i = 0;
+  while (i < maleQueue.length) {
+    const aId = maleQueue[i];
     const a = io.sockets.sockets.get(aId);
-    const b = io.sockets.sockets.get(bId);
-    if (!a || !b) {
-      if (a) anyQueue.push(aId);
-      if (b) anyQueue.push(bId);
+    if (!a) {
+      maleQueue.splice(i, 1);
       continue;
     }
-    createRoom(a, b);
+
+    let matched = false;
+    for (let j = 0; j < femaleQueue.length; j++) {
+      const bId = femaleQueue[j];
+      const b = io.sockets.sockets.get(bId);
+      if (!b) {
+        femaleQueue.splice(j, 1);
+        j--;
+        continue;
+      }
+
+      const aWant = a.data && a.data.want ? a.data.want : "any"; // a is male
+      const bWant = b.data && b.data.want ? b.data.want : "any"; // b is female
+
+      const aAcceptsB = aWant === "any" || aWant === "female";
+      const bAcceptsA = bWant === "any" || bWant === "male";
+
+      if (aAcceptsB && bAcceptsA) {
+        // remove matched entries
+        maleQueue.splice(i, 1);
+        femaleQueue.splice(j, 1);
+        createRoom(a, b);
+        matched = true;
+        break;
+      }
+    }
+
+    if (!matched) i++;
   }
 }
 
 function enqueue(socket) {
-  if (!socket || !socket.data) return;
+  if (!socket || !socket.data || !socket.data.gender) return;
   const id = socket.id;
-  const want = socket.data.want || "any";
-  // Prevent duplicates
+  // ensure no duplicates
   removeFromQueue(maleQueue, id);
   removeFromQueue(femaleQueue, id);
-  removeFromQueue(anyQueue, id);
 
-  if (want === "male") {
+  if (socket.data.gender === "male") {
     maleQueue.push(id);
-  } else if (want === "female") {
-    femaleQueue.push(id);
   } else {
-    anyQueue.push(id);
+    femaleQueue.push(id);
   }
 
   socket.data.lastMatchRequest = Date.now();
-  console.log(`[enqueue] ${id} (want=${want}) queued. maleWant=${maleQueue.length} femaleWant=${femaleQueue.length} any=${anyQueue.length}`);
+  console.log(`[enqueue] ${id} (gender=${socket.data.gender}, want=${socket.data.want}) queued. male=${maleQueue.length} female=${femaleQueue.length}`);
   socket.emit("waiting");
 }
 
