@@ -259,14 +259,26 @@ function teardownRoom(roomId, reason, initiatorId = null) {
 
   // If initiatorId provided, only notify the other peer that their partner left
   if (initiatorId) {
+    const initiator = io.sockets.sockets.get(initiatorId);
     const otherId = info.a === initiatorId ? info.b : info.a;
     const other = io.sockets.sockets.get(otherId);
+
+    if (initiator) {
+      initiator.leave(roomId);
+      initiator.data.roomId = null;
+    }
+
     if (other) {
       other.leave(roomId);
       other.data.roomId = null;
-      other.emit("partner-left", { reason, message: "User left the chat" });
+      other.emit("partner-left", {
+        reason,
+        message: reason === "skipped"
+          ? "Stranger disconnected — searching for a new match..."
+          : "User left the chat",
+      });
 
-      // Automatically requeue the remaining participant when their partner left
+      // Automatically requeue the remaining participant when their partner left normally
       if (reason === "left") {
         enqueue(other);
         matchQueues();
