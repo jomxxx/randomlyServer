@@ -183,12 +183,8 @@ function matchQueues() {
 }
 
 function broadcastQueueStats() {
-  const stats = {
-    maleWaitingCount: maleQueue.length,
-    femaleWaitingCount: femaleQueue.length,
-    waitingCount: maleQueue.length + femaleQueue.length,
-  };
-  io.emit("queue-stats", stats);
+  // Queue stats emission disabled — remove public display of waiting counts
+  return;
 }
 
 function enqueue(socket) {
@@ -203,8 +199,8 @@ function enqueue(socket) {
   console.log(
     `[enqueue] ${id} (${socket.data.gender}) queued. male=${maleQueue.length} female=${femaleQueue.length}`,
   );
-  socket.emit("waiting");
-  broadcastQueueStats();
+    // Do not emit individual waiting events or broadcast queue stats
+    // broadcastQueueStats();
 }
 
 function tryMatch(socket) {
@@ -229,7 +225,7 @@ function removeFromQueue(queue, socketId) {
   const idx = queue.indexOf(socketId);
   if (idx !== -1) {
     queue.splice(idx, 1);
-    broadcastQueueStats();
+     // Do not broadcast queue stats on removal
   }
 }
 
@@ -331,11 +327,7 @@ io.on("connection", (socket) => {
     lastMatchRequest: 0,
     lastMatchedAt: 0,
   };
-  socket.emit("queue-stats", {
-    maleWaitingCount: maleQueue.length,
-    femaleWaitingCount: femaleQueue.length,
-    waitingCount: maleQueue.length + femaleQueue.length,
-  });
+  // initial queue-stats emission disabled to remove public waiting counts
 
   updateActivity(socket);
   socket.onAny(() => updateActivity(socket));
