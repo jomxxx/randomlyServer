@@ -136,25 +136,22 @@ setInterval(() => {
  * This will repeatedly create rooms while both queues have members.
  */
 function matchQueues() {
-  // Attempt to match any two waiting users when both accept each other.
-  while (true) {
-    const allIds = [...maleQueue, ...femaleQueue];
+  // Only match users across genders: male <> female.
+  while (maleQueue.length > 0 && femaleQueue.length > 0) {
     let matchFound = false;
 
-    for (let i = 0; i < allIds.length; i++) {
-      const aId = allIds[i];
+    for (let i = 0; i < maleQueue.length; i++) {
+      const aId = maleQueue[i];
       const a = io.sockets.sockets.get(aId);
       if (!a) {
         removeFromQueue(maleQueue, aId);
-        removeFromQueue(femaleQueue, aId);
         continue;
       }
 
-      for (let j = i + 1; j < allIds.length; j++) {
-        const bId = allIds[j];
+      for (let j = 0; j < femaleQueue.length; j++) {
+        const bId = femaleQueue[j];
         const b = io.sockets.sockets.get(bId);
         if (!b) {
-          removeFromQueue(maleQueue, bId);
           removeFromQueue(femaleQueue, bId);
           continue;
         }
