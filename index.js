@@ -182,6 +182,15 @@ function matchQueues() {
   }
 }
 
+function broadcastQueueStats() {
+  const stats = {
+    maleWaitingCount: maleQueue.length,
+    femaleWaitingCount: femaleQueue.length,
+    waitingCount: maleQueue.length + femaleQueue.length,
+  };
+  io.emit("queue-stats", stats);
+}
+
 function enqueue(socket) {
   if (!socket || !socket.data || !socket.data.gender) return;
   const id = socket.id;
@@ -195,6 +204,7 @@ function enqueue(socket) {
     `[enqueue] ${id} (${socket.data.gender}) queued. male=${maleQueue.length} female=${femaleQueue.length}`,
   );
   socket.emit("waiting");
+  broadcastQueueStats();
 }
 
 function tryMatch(socket) {
@@ -217,7 +227,10 @@ const rooms = new Map(); // roomId -> {a, b}
 
 function removeFromQueue(queue, socketId) {
   const idx = queue.indexOf(socketId);
-  if (idx !== -1) queue.splice(idx, 1);
+  if (idx !== -1) {
+    queue.splice(idx, 1);
+    broadcastQueueStats();
+  }
 }
 
 function createRoom(aSocket, bSocket) {
@@ -259,26 +272,14 @@ function teardownRoom(roomId, reason, initiatorId = null) {
 
   // If initiatorId provided, only notify the other peer that their partner left
   if (initiatorId) {
-    const initiator = io.sockets.sockets.get(initiatorId);
     const otherId = info.a === initiatorId ? info.b : info.a;
     const other = io.sockets.sockets.get(otherId);
-
-    if (initiator) {
-      initiator.leave(roomId);
-      initiator.data.roomId = null;
-    }
-
     if (other) {
       other.leave(roomId);
       other.data.roomId = null;
-      other.emit("partner-left", {
-        reason,
-        message: reason === "skipped"
-          ? "Stranger disconnected — searching for a new match..."
-          : "User left the chat",
-      });
+      other.emit("partner-left", { reason, message: "User left the chat" });
 
-      // Automatically requeue the remaining participant when their partner left normally
+      // Automatically requeue the remaining participant when their partner left
       if (reason === "left") {
         enqueue(other);
         matchQueues();
@@ -330,6 +331,11 @@ io.on("connection", (socket) => {
     lastMatchRequest: 0,
     lastMatchedAt: 0,
   };
+  socket.emit("queue-stats", {
+    maleWaitingCount: maleQueue.length,
+    femaleWaitingCount: femaleQueue.length,
+    waitingCount: maleQueue.length + femaleQueue.length,
+  });
 
   updateActivity(socket);
   socket.onAny(() => updateActivity(socket));
