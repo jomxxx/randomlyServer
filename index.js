@@ -136,26 +136,52 @@ setInterval(() => {
  * This will repeatedly create rooms while both queues have members.
  */
 function matchQueues() {
-  while (maleQueue.length > 0 && femaleQueue.length > 0) {
-    const aId = maleQueue.shift();
-    const bId = femaleQueue.shift();
-    console.log(`[matchQueues] pairing ${aId} (male) with ${bId} (female)`);
-    const a = io.sockets.sockets.get(aId);
-    const b = io.sockets.sockets.get(bId);
-    if (!a || !b) {
-      // If either socket is gone, skip and continue
-      if (a) {
-        // requeue a
+  // Attempt to match any two waiting users when both accept each other.
+  while (true) {
+    const allIds = [...maleQueue, ...femaleQueue];
+    let matchFound = false;
+
+    for (let i = 0; i < allIds.length; i++) {
+      const aId = allIds[i];
+      const a = io.sockets.sockets.get(aId);
+      if (!a) {
         removeFromQueue(maleQueue, aId);
-        maleQueue.push(aId);
+        removeFromQueue(femaleQueue, aId);
+        continue;
       }
-      if (b) {
-        removeFromQueue(femaleQueue, bId);
-        femaleQueue.push(bId);
+
+      for (let j = i + 1; j < allIds.length; j++) {
+        const bId = allIds[j];
+        const b = io.sockets.sockets.get(bId);
+        if (!b) {
+          removeFromQueue(maleQueue, bId);
+          removeFromQueue(femaleQueue, bId);
+          continue;
+        }
+
+        const aWant = a.data?.want || "any";
+        const bWant = b.data?.want || "any";
+        const aGender = a.data?.gender;
+        const bGender = b.data?.gender;
+
+        const aAcceptsB = aWant === "any" || aWant === bGender;
+        const bAcceptsA = bWant === "any" || bWant === aGender;
+
+        if (aAcceptsB && bAcceptsA) {
+          removeFromQueue(maleQueue, aId);
+          removeFromQueue(femaleQueue, aId);
+          removeFromQueue(maleQueue, bId);
+          removeFromQueue(femaleQueue, bId);
+          createRoom(a, b);
+          matchFound = true;
+          break;
+        }
       }
-      continue;
+
+      if (matchFound) break;
     }
-    createRoom(a, b);
+
+    if (!matchFound) break;
   }
 }
 
@@ -299,7 +325,7 @@ io.on("connection", (socket) => {
   updateActivity(socket);
   socket.onAny(() => updateActivity(socket));
 
-  socket.on("join", ({ gender, avatar }) => {
+  socket.on("join", ({ gender, avatar, want }) => {
     updateActivity(socket);
     const ip = getClientIp(socket);
     if (isIpBlocked(ip)) {
@@ -326,6 +352,7 @@ io.on("connection", (socket) => {
 
     socket.data.hasJoined = true;
     socket.data.gender = gender === "female" ? "female" : "male";
+    socket.data.want = want === "female" ? "female" : want === "male" ? "male" : "any";
     socket.data.avatar = avatar || null;
     // centralize matching logic
     tryMatch(socket);
