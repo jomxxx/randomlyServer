@@ -349,7 +349,8 @@ io.on("connection", (socket) => {
 
     socket.data.hasJoined = true;
     socket.data.gender = gender === "female" ? "female" : "male";
-    socket.data.want = want === "female" ? "female" : want === "male" ? "male" : "any";
+    socket.data.want =
+      want === "female" ? "female" : want === "male" ? "male" : "any";
     socket.data.avatar = avatar || null;
     // centralize matching logic
     tryMatch(socket);
