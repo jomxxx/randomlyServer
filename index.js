@@ -286,23 +286,26 @@ function teardownRoom(roomId, reason, initiatorId = null) {
     if (other) {
       other.leave(roomId);
       other.data.roomId = null;
+      other.data.hasJoined = false;
+      other.data.inQueue = false;
 
-      // Send the correct message based on reason
+      // Always just notify — never auto-requeue the partner
+      // They must manually click "Find Next" themselves
       if (reason === "skipped") {
-        // Partner clicked "Find Next" — tell other user stranger disconnected and is searching
         other.emit("partner-left", {
           reason,
-          message: "⚠️ Stranger disconnected — searching for a new match...",
+          message: "⚠️ Stranger skipped — click Find Next to keep chatting.",
         });
-        // Do NOT auto-requeue other here — let the next handler do it explicitly
       } else if (reason === "left") {
         other.emit("partner-left", {
           reason,
-          message: "⚠️ Stranger left the chat.",
+          message: "⚠️ Stranger left the chat — click Find Next to meet someone new.",
         });
-        // Requeue the remaining user when partner fully left
-        enqueue(other);
-        matchQueues();
+      } else {
+        other.emit("partner-left", {
+          reason,
+          message: "⚠️ Stranger disconnected — click Find Next to meet someone new.",
+        });
       }
     }
     return;
@@ -449,15 +452,7 @@ io.on("connection", (socket) => {
     enqueue(socket);
     matchQueues();
 
-    // Requeue the partner after short delay so their UI shows the message first
-    setTimeout(() => {
-      const partnerSocket = io.sockets.sockets.get(partnerId);
-      if (partnerSocket && !partnerSocket.data.roomId && !partnerSocket.data.inQueue) {
-        partnerSocket.data.hasJoined = false;
-        enqueue(partnerSocket);
-        matchQueues();
-      }
-    }, 1500);
+    // Do NOT requeue the partner — they must click "Find Next" themselves
   });
 
   // ── REPORT ────────────────────────────────────────────────
@@ -509,14 +504,7 @@ io.on("connection", (socket) => {
 
       teardownRoom(roomId, "disconnected", socket.id);
 
-      if (otherId) {
-        const other = io.sockets.sockets.get(otherId);
-        if (other && !other.data.roomId) {
-          other.data.hasJoined = false;
-          enqueue(other);
-          matchQueues();
-        }
-      }
+      // Do NOT auto-requeue the other user — they must click "Find Next" themselves
     }
   });
 });
