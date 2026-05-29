@@ -10,29 +10,34 @@ const io = new Server(server, {
   cors: { origin: "*" },
 });
 
+// ===== QUEUES =====
 const maleQueue = [];
 const femaleQueue = [];
+const rooms = new Map(); // roomId -> { a, b }
 
-// ===== SECURITY & ANTI-ABUSE TRACKING =====
-const ipConnectionMap = new Map(); // IP -> { count, lastConnection }
-const abuseTracker = new Map(); // IP -> { reportCount, blockedUntil }
-const messageRateLimiter = new Map(); // socketId -> { count, resetTime }
-const rejoinTracker = new Map(); // IP -> { count, resetTime }
+// ===== SECURITY TRACKING =====
+const ipConnectionMap = new Map();   // IP -> { count, lastConnection }
+const abuseTracker = new Map();      // IP -> { reportCount, blockedUntil }
+const messageRateLimiter = new Map(); // socketId -> { count, resetTime, violations }
+const rejoinTracker = new Map();     // IP -> { count, resetTime }
 const inactivityTracker = new Map(); // socketId -> lastActivityTime
 
 const SECURITY_CONFIG = {
   MAX_CONNECTIONS_PER_IP: 5,
   IP_COOLDOWN_MS: 2000,
   MESSAGES_PER_SECOND: 10,
+  MAX_MESSAGE_LENGTH: 500,          // FIX: prevent huge messages
   ABUSE_REPORT_THRESHOLD: 3,
-  ABUSE_BLOCK_DURATION: 300000, // 5 minutes
+  ABUSE_BLOCK_DURATION: 300000,     // 5 minutes
   REJOIN_COOLDOWN_MS: 3000,
   MAX_REJOIN_ATTEMPTS: 5,
-  INACTIVITY_TIMEOUT_MS: 300000, // 5 minutes
-  RATE_LIMIT_WINDOW: 1000, // 1 second
+  INACTIVITY_TIMEOUT_MS: 300000,    // 5 minutes
+  RATE_LIMIT_WINDOW: 1000,          // 1 second
   MIN_MATCH_TIME_MS: 8000,
+  MAP_CLEANUP_INTERVAL_MS: 60000,   // FIX: clean stale map entries every 60s
 };
 
+// ===== HELPERS =====
 function getClientIp(socket) {
   const forwarded = socket.handshake?.headers?.["x-forwarded-for"];
   const address = forwarded || socket.handshake?.address || "unknown";
@@ -41,7 +46,7 @@ function getClientIp(socket) {
 
 function isIpBlocked(ip) {
   const entry = abuseTracker.get(ip);
-  if (!entry || !entry.blockedUntil) return false;
+  if (!entry?.blockedUntil) return false;
   if (Date.now() > entry.blockedUntil) {
     abuseTracker.delete(ip);
     return false;
@@ -78,9 +83,9 @@ function trackRejoinAttempt(ip) {
   return entry.count <= SECURITY_CONFIG.MAX_REJOIN_ATTEMPTS;
 }
 
-function trackMessageRate(socket) {
+function trackMessageRate(socketId) {
   const now = Date.now();
-  const entry = messageRateLimiter.get(socket.id) || {
+  const entry = messageRateLimiter.get(socketId) || {
     count: 0,
     resetTime: now + SECURITY_CONFIG.RATE_LIMIT_WINDOW,
     violations: 0,
@@ -91,10 +96,10 @@ function trackMessageRate(socket) {
   } else {
     entry.count += 1;
   }
-  messageRateLimiter.set(socket.id, entry);
+  messageRateLimiter.set(socketId, entry);
   if (entry.count > SECURITY_CONFIG.MESSAGES_PER_SECOND) {
     entry.violations += 1;
-    messageRateLimiter.set(socket.id, entry);
+    messageRateLimiter.set(socketId, entry);
     return false;
   }
   return true;
@@ -115,6 +120,40 @@ function addReport(ip) {
   return entry;
 }
 
+// ===== FIX: Periodic cleanup of stale map entries =====
+setInterval(() => {
+  const now = Date.now();
+
+  // Clean ipConnectionMap entries older than cooldown window
+  for (const [ip, entry] of ipConnectionMap.entries()) {
+    if (now - entry.lastConnection > SECURITY_CONFIG.IP_COOLDOWN_MS * 10) {
+      ipConnectionMap.delete(ip);
+    }
+  }
+
+  // Clean expired abuse blocks
+  for (const [ip, entry] of abuseTracker.entries()) {
+    if (entry.blockedUntil && now > entry.blockedUntil) {
+      abuseTracker.delete(ip);
+    }
+  }
+
+  // Clean expired rejoin entries
+  for (const [ip, entry] of rejoinTracker.entries()) {
+    if (now > entry.resetTime + SECURITY_CONFIG.REJOIN_COOLDOWN_MS) {
+      rejoinTracker.delete(ip);
+    }
+  }
+
+  // Clean message rate entries for disconnected sockets
+  for (const [socketId] of messageRateLimiter.entries()) {
+    if (!io.sockets.sockets.get(socketId)) {
+      messageRateLimiter.delete(socketId);
+    }
+  }
+}, SECURITY_CONFIG.MAP_CLEANUP_INTERVAL_MS);
+
+// ===== Inactivity timeout =====
 setInterval(() => {
   const now = Date.now();
   for (const [socketId, lastActive] of inactivityTracker.entries()) {
@@ -131,43 +170,61 @@ setInterval(() => {
   }
 }, 30000);
 
-/**
- * Try to pair users from the male and female queues.
- * This will repeatedly create rooms while both queues have members.
- */
+// ===== QUEUE HELPERS =====
+function removeFromQueue(queue, socketId) {
+  const idx = queue.indexOf(socketId);
+  if (idx !== -1) {
+    queue.splice(idx, 1);
+    broadcastQueueStats();
+  }
+}
+
+function removeFromAllQueues(socketId) {
+  removeFromQueue(maleQueue, socketId);
+  removeFromQueue(femaleQueue, socketId);
+}
+
+function broadcastQueueStats() {
+  io.emit("queue-stats", {
+    maleWaitingCount: maleQueue.length,
+    femaleWaitingCount: femaleQueue.length,
+    waitingCount: maleQueue.length + femaleQueue.length,
+  });
+}
+
+function enqueue(socket) {
+  if (!socket?.data?.gender) return;
+  const id = socket.id;
+  const queue = socket.data.gender === "male" ? maleQueue : femaleQueue;
+  if (!queue.includes(id)) queue.push(id);
+  socket.data.lastMatchRequest = Date.now();
+  socket.data.inQueue = true;
+  console.log(`[enqueue] ${id} (${socket.data.gender}) — male=${maleQueue.length} female=${femaleQueue.length}`);
+  socket.emit("waiting");
+  broadcastQueueStats();
+}
+
+// ===== MATCHING =====
 function matchQueues() {
-  // Only match users across genders: male <> female.
   while (maleQueue.length > 0 && femaleQueue.length > 0) {
     let matchFound = false;
 
     for (let i = 0; i < maleQueue.length; i++) {
       const aId = maleQueue[i];
       const a = io.sockets.sockets.get(aId);
-      if (!a) {
-        removeFromQueue(maleQueue, aId);
-        continue;
-      }
+      if (!a) { removeFromQueue(maleQueue, aId); continue; }
 
       for (let j = 0; j < femaleQueue.length; j++) {
         const bId = femaleQueue[j];
         const b = io.sockets.sockets.get(bId);
-        if (!b) {
-          removeFromQueue(femaleQueue, bId);
-          continue;
-        }
+        if (!b) { removeFromQueue(femaleQueue, bId); continue; }
 
-        const aWant = a.data?.want || "any";
-        const bWant = b.data?.want || "any";
-        const aGender = a.data?.gender;
-        const bGender = b.data?.gender;
-
-        const aAcceptsB = aWant === "any" || aWant === bGender;
-        const bAcceptsA = bWant === "any" || bWant === aGender;
+        const aAcceptsB = a.data?.want === "any" || a.data?.want === b.data?.gender;
+        const bAcceptsA = b.data?.want === "any" || b.data?.want === a.data?.gender;
 
         if (aAcceptsB && bAcceptsA) {
+          // FIX: remove each socket from their own correct queue only
           removeFromQueue(maleQueue, aId);
-          removeFromQueue(femaleQueue, aId);
-          removeFromQueue(maleQueue, bId);
           removeFromQueue(femaleQueue, bId);
           createRoom(a, b);
           matchFound = true;
@@ -182,95 +239,39 @@ function matchQueues() {
   }
 }
 
-function broadcastQueueStats() {
-  const stats = {
-    maleWaitingCount: maleQueue.length,
-    femaleWaitingCount: femaleQueue.length,
-    waitingCount: maleQueue.length + femaleQueue.length,
-  };
-  io.emit("queue-stats", stats);
-}
-
-function enqueue(socket) {
-  if (!socket || !socket.data || !socket.data.gender) return;
-  const id = socket.id;
-  if (socket.data.gender === "male") {
-    if (!maleQueue.includes(id)) maleQueue.push(id);
-  } else {
-    if (!femaleQueue.includes(id)) femaleQueue.push(id);
-  }
-  socket.data.lastMatchRequest = Date.now();
-  console.log(
-    `[enqueue] ${id} (${socket.data.gender}) queued. male=${maleQueue.length} female=${femaleQueue.length}`,
-  );
-  socket.emit("waiting");
-  broadcastQueueStats();
-}
-
-function tryMatch(socket) {
-  const gender = socket.data.gender;
-  if (!gender) return;
-  if (gender === "male") {
-    enqueue(socket);
-    matchQueues();
-    return;
-  }
-
-  if (gender === "female") {
-    enqueue(socket);
-    matchQueues();
-    return;
-  }
-}
-
-const rooms = new Map(); // roomId -> {a, b}
-
-function removeFromQueue(queue, socketId) {
-  const idx = queue.indexOf(socketId);
-  if (idx !== -1) {
-    queue.splice(idx, 1);
-    broadcastQueueStats();
-  }
-}
-
 function createRoom(aSocket, bSocket) {
-  console.log(`[createRoom] creating room for ${aSocket.id} and ${bSocket.id}`);
-  // ensure sockets are removed from any queues
-  removeFromQueue(maleQueue, aSocket.id);
-  removeFromQueue(femaleQueue, aSocket.id);
-  removeFromQueue(maleQueue, bSocket.id);
-  removeFromQueue(femaleQueue, bSocket.id);
+  console.log(`[createRoom] ${aSocket.id} <-> ${bSocket.id}`);
+  removeFromAllQueues(aSocket.id);
+  removeFromAllQueues(bSocket.id);
+
   const roomId = `${aSocket.id}#${bSocket.id}`;
   aSocket.join(roomId);
   bSocket.join(roomId);
   rooms.set(roomId, { a: aSocket.id, b: bSocket.id });
-  aSocket.data.roomId = roomId;
-  bSocket.data.roomId = roomId;
+
   const now = Date.now();
+  aSocket.data.roomId = roomId;
   aSocket.data.lastMatchedAt = now;
+  aSocket.data.inQueue = false;
+
+  bSocket.data.roomId = roomId;
   bSocket.data.lastMatchedAt = now;
-  aSocket.emit("matched", {
-    roomId,
-    partnerId: bSocket.id,
-    partnerAvatar: bSocket.data.avatar,
-  });
-  bSocket.emit("matched", {
-    roomId,
-    partnerId: aSocket.id,
-    partnerAvatar: aSocket.data.avatar,
-  });
+  bSocket.data.inQueue = false;
+
+  aSocket.emit("matched", { roomId, partnerId: bSocket.id, partnerAvatar: bSocket.data.avatar });
+  bSocket.emit("matched", { roomId, partnerId: aSocket.id, partnerAvatar: aSocket.data.avatar });
 }
 
 function teardownRoom(roomId, reason, initiatorId = null) {
   const info = rooms.get(roomId);
   if (!info) return;
-  const a = io.sockets.sockets.get(info.a);
-  const b = io.sockets.sockets.get(info.b);
-  console.log(
-    `[teardownRoom] room=${roomId} reason=${reason} initiator=${initiatorId}`,
-  );
 
-  // If initiatorId provided, only notify the other peer that their partner left
+  const aSocket = io.sockets.sockets.get(info.a);
+  const bSocket = io.sockets.sockets.get(info.b);
+
+  rooms.delete(roomId);
+  console.log(`[teardownRoom] room=${roomId} reason=${reason} initiator=${initiatorId}`);
+
   if (initiatorId) {
     const otherId = info.a === initiatorId ? info.b : info.a;
     const other = io.sockets.sockets.get(otherId);
@@ -278,47 +279,42 @@ function teardownRoom(roomId, reason, initiatorId = null) {
       other.leave(roomId);
       other.data.roomId = null;
       other.emit("partner-left", { reason, message: "User left the chat" });
-
-      // Automatically requeue the remaining participant when their partner left
       if (reason === "left") {
         enqueue(other);
         matchQueues();
       }
     }
-    // remove room
-    rooms.delete(roomId);
+    // Clear initiator room data too
+    const initiator = io.sockets.sockets.get(initiatorId);
+    if (initiator) {
+      initiator.leave(roomId);
+      initiator.data.roomId = null;
+    }
     return;
   }
 
-  // Default behavior: notify both participants
-  if (a) {
-    a.leave(roomId);
-    a.data.roomId = null;
-    a.emit("partner-left", { reason, message: "Partner left the chat" });
-  }
-  if (b) {
-    b.leave(roomId);
-    b.data.roomId = null;
-    b.emit("partner-left", { reason, message: "Partner left the chat" });
-  }
-  rooms.delete(roomId);
+  // Notify both
+  [aSocket, bSocket].forEach((s) => {
+    if (s) {
+      s.leave(roomId);
+      s.data.roomId = null;
+      s.emit("partner-left", { reason, message: "Partner left the chat" });
+    }
+  });
 }
 
+// ===== SOCKET EVENTS =====
 io.on("connection", (socket) => {
   const ip = getClientIp(socket);
+
   if (isIpBlocked(ip)) {
-    socket.emit("blocked", {
-      message: "This IP is temporarily blocked due to abuse reports.",
-    });
+    socket.emit("blocked", { message: "This IP is temporarily blocked due to abuse reports." });
     socket.disconnect(true);
     return;
   }
 
   if (!trackConnectionAttempt(ip)) {
-    socket.emit("match-error", {
-      message:
-        "Too many connection attempts from this network. Please wait a moment.",
-    });
+    socket.emit("match-error", { message: "Too many connection attempts. Please wait a moment." });
     socket.disconnect(true);
     return;
   }
@@ -328,9 +324,11 @@ io.on("connection", (socket) => {
     roomId: null,
     avatar: null,
     hasJoined: false,
+    inQueue: false,
     lastMatchRequest: 0,
     lastMatchedAt: 0,
   };
+
   socket.emit("queue-stats", {
     maleWaitingCount: maleQueue.length,
     femaleWaitingCount: femaleQueue.length,
@@ -340,101 +338,118 @@ io.on("connection", (socket) => {
   updateActivity(socket);
   socket.onAny(() => updateActivity(socket));
 
+  // ── JOIN ──────────────────────────────────────────────────
   socket.on("join", ({ gender, avatar, want }) => {
     updateActivity(socket);
     const ip = getClientIp(socket);
+
     if (isIpBlocked(ip)) {
-      socket.emit("blocked", {
-        message: "This IP is temporarily blocked due to abuse reports.",
-      });
+      socket.emit("blocked", { message: "This IP is temporarily blocked due to abuse reports." });
       socket.disconnect(true);
       return;
     }
 
+    if (socket.data.hasJoined && !socket.data.roomId && !socket.data.inQueue) {
+      // Allow rejoin after disconnect/next — reset flag
+      socket.data.hasJoined = false;
+    }
+
     if (socket.data.hasJoined) {
-      socket.emit("match-error", {
-        message: "You are already queued. Please wait for a match.",
-      });
+      socket.emit("match-error", { message: "You are already queued. Please wait for a match." });
       return;
     }
 
     if (!trackRejoinAttempt(ip)) {
-      socket.emit("match-error", {
-        message: "Too many quick reconnects. Please wait before trying again.",
-      });
+      socket.emit("match-error", { message: "Too many quick reconnects. Please wait before trying again." });
       return;
     }
 
     socket.data.hasJoined = true;
     socket.data.gender = gender === "female" ? "female" : "male";
-    socket.data.want =
-      want === "female" ? "female" : want === "male" ? "male" : "any";
+    socket.data.want = want === "female" ? "female" : want === "male" ? "male" : "any";
     socket.data.avatar = avatar || null;
-    // centralize matching logic
+
     tryMatch(socket);
   });
 
-  socket.on("message", ({ roomId, text }) => {
+  // ── MESSAGE ───────────────────────────────────────────────
+  socket.on("message", ({ text }) => {
     updateActivity(socket);
     const rId = socket.data.roomId;
     if (!rId || typeof text !== "string") return;
-    if (!trackMessageRate(socket)) {
-      socket.emit("rate-limit", {
-        message: "Slow down — messages are limited to prevent spam.",
-      });
+
+    // FIX: enforce message length limit
+    if (text.length > SECURITY_CONFIG.MAX_MESSAGE_LENGTH) {
+      socket.emit("rate-limit", { message: "Message too long (max 500 characters)." });
       return;
     }
+
+    if (!trackMessageRate(socket.id)) {
+      socket.emit("rate-limit", { message: "Slow down — messages are limited to prevent spam." });
+      return;
+    }
+
     socket.to(rId).emit("message", { from: socket.id, text });
   });
 
-  socket.on("typing", ({ roomId, typing }) => {
+  // ── TYPING ────────────────────────────────────────────────
+  socket.on("typing", ({ typing }) => {
     updateActivity(socket);
     const rId = socket.data.roomId;
     if (!rId) return;
     socket.to(rId).emit("typing", { from: socket.id, typing });
   });
 
+  // ── NEXT ──────────────────────────────────────────────────
   socket.on("next", () => {
     updateActivity(socket);
     const roomId = socket.data.roomId;
-    if (!roomId) return;
-    if (
-      Date.now() - (socket.data.lastMatchedAt || 0) <
-      SECURITY_CONFIG.MIN_MATCH_TIME_MS
-    ) {
-      socket.emit("match-error", {
-        message: "Please wait a few seconds before skipping to a new chat.",
-      });
+
+    if (!roomId) {
+      // Already searching, do nothing
       return;
     }
+
+    if (Date.now() - (socket.data.lastMatchedAt || 0) < SECURITY_CONFIG.MIN_MATCH_TIME_MS) {
+      socket.emit("match-error", { message: "Please wait a few seconds before skipping." });
+      return;
+    }
+
     const info = rooms.get(roomId);
     if (!info) return;
-    const aId = info.a;
-    const bId = info.b;
-    // teardown and notify only the partner (not the initiator)
+
+    const partnerId = info.a === socket.id ? info.b : info.a;
+
     teardownRoom(roomId, "skipped", socket.id);
-    // requeue both (if still connected)
-    const aSock = io.sockets.sockets.get(aId);
-    const bSock = io.sockets.sockets.get(bId);
-    if (aSock) {
-      enqueue(aSock);
-      matchQueues();
-    }
-    if (bSock) {
-      enqueue(bSock);
+
+    // FIX: reset hasJoined so rejoin works, then requeue
+    socket.data.hasJoined = false;
+    socket.data.gender = socket.data.gender; // already set
+
+    enqueue(socket);
+    matchQueues();
+
+    // Requeue the partner if still connected
+    const partnerSocket = io.sockets.sockets.get(partnerId);
+    if (partnerSocket && !partnerSocket.data.roomId) {
+      partnerSocket.data.hasJoined = false;
+      enqueue(partnerSocket);
       matchQueues();
     }
   });
 
+  // ── REPORT ────────────────────────────────────────────────
   socket.on("report", ({ roomId, reportedId }) => {
     updateActivity(socket);
     const currentRoomId = socket.data.roomId;
     if (!currentRoomId || currentRoomId !== roomId || !reportedId) return;
+
     const reportedSocket = io.sockets.sockets.get(reportedId);
     if (!reportedSocket) return;
 
     const reportedIp = getClientIp(reportedSocket);
     const reportEntry = addReport(reportedIp);
+
     socket.emit("report-ack", {
       message: reportEntry.blockedUntil
         ? "Report received. User is temporarily blocked."
@@ -442,43 +457,40 @@ io.on("connection", (socket) => {
     });
 
     if (reportEntry.blockedUntil) {
-      reportedSocket.emit("reported", {
-        reportCount: reportEntry.reportCount,
-        blocked: true,
-      });
-      reportedSocket.emit("match-error", {
-        message: "You have been temporarily blocked due to reports.",
-      });
+      reportedSocket.emit("reported", { reportCount: reportEntry.reportCount, blocked: true });
+      reportedSocket.emit("match-error", { message: "You have been temporarily blocked due to reports." });
       reportedSocket.disconnect(true);
     }
   });
 
+  // ── LEAVE ─────────────────────────────────────────────────
   socket.on("leave", () => {
     const roomId = socket.data.roomId;
     if (roomId) {
-      // notify only the partner that this user left
       teardownRoom(roomId, "left", socket.id);
-      return;
     }
-    // remove from queues
-    removeFromQueue(maleQueue, socket.id);
-    removeFromQueue(femaleQueue, socket.id);
+    removeFromAllQueues(socket.id);
+    socket.data.hasJoined = false;
+    socket.data.inQueue = false;
   });
 
+  // ── DISCONNECT ────────────────────────────────────────────
   socket.on("disconnect", () => {
-    // remove from queues
-    removeFromQueue(maleQueue, socket.id);
-    removeFromQueue(femaleQueue, socket.id);
+    removeFromAllQueues(socket.id);
+    inactivityTracker.delete(socket.id);
+    messageRateLimiter.delete(socket.id);
+
     const roomId = socket.data.roomId;
     if (roomId) {
       const info = rooms.get(roomId);
       const otherId = info ? (info.a === socket.id ? info.b : info.a) : null;
-      // notify only the other participant
+
       teardownRoom(roomId, "disconnected", socket.id);
-      // requeue the remaining partner if connected
+
       if (otherId) {
         const other = io.sockets.sockets.get(otherId);
-        if (other) {
+        if (other && !other.data.roomId) {
+          other.data.hasJoined = false;
           enqueue(other);
           matchQueues();
         }
@@ -487,6 +499,24 @@ io.on("connection", (socket) => {
   });
 });
 
-app.get("/", (req, res) => res.send("Randomly server running"));
+function tryMatch(socket) {
+  if (!socket.data.gender) return;
+  enqueue(socket);
+  matchQueues();
+}
+
+// ===== ROUTES =====
+app.get("/", (req, res) => res.send("Randoomly server running"));
+
+// Health + stats endpoint — useful for monitoring
+app.get("/stats", (req, res) => {
+  res.json({
+    activeConnections: io.sockets.sockets.size,
+    activeRooms: rooms.size,
+    maleQueue: maleQueue.length,
+    femaleQueue: femaleQueue.length,
+    blockedIps: [...abuseTracker.values()].filter((e) => e.blockedUntil > Date.now()).length,
+  });
+});
 
 server.listen(PORT, () => console.log(`Server listening on ${PORT}`));
