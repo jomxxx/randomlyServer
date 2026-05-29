@@ -275,20 +275,35 @@ function teardownRoom(roomId, reason, initiatorId = null) {
   if (initiatorId) {
     const otherId = info.a === initiatorId ? info.b : info.a;
     const other = io.sockets.sockets.get(otherId);
-    if (other) {
-      other.leave(roomId);
-      other.data.roomId = null;
-      other.emit("partner-left", { reason, message: "User left the chat" });
-      if (reason === "left") {
-        enqueue(other);
-        matchQueues();
-      }
-    }
-    // Clear initiator room data too
+
+    // Clear initiator room data
     const initiator = io.sockets.sockets.get(initiatorId);
     if (initiator) {
       initiator.leave(roomId);
       initiator.data.roomId = null;
+    }
+
+    if (other) {
+      other.leave(roomId);
+      other.data.roomId = null;
+
+      // Send the correct message based on reason
+      if (reason === "skipped") {
+        // Partner clicked "Find Next" — tell other user stranger disconnected and is searching
+        other.emit("partner-left", {
+          reason,
+          message: "⚠️ Stranger disconnected — searching for a new match...",
+        });
+        // Do NOT auto-requeue other here — let the next handler do it explicitly
+      } else if (reason === "left") {
+        other.emit("partner-left", {
+          reason,
+          message: "⚠️ Stranger left the chat.",
+        });
+        // Requeue the remaining user when partner fully left
+        enqueue(other);
+        matchQueues();
+      }
     }
     return;
   }
@@ -420,16 +435,15 @@ io.on("connection", (socket) => {
 
     const partnerId = info.a === socket.id ? info.b : info.a;
 
+    // Teardown notifies the partner with correct message, does NOT requeue them
     teardownRoom(roomId, "skipped", socket.id);
 
-    // FIX: reset hasJoined so rejoin works, then requeue
+    // Requeue the initiator (the one who clicked Find Next)
     socket.data.hasJoined = false;
-    socket.data.gender = socket.data.gender; // already set
-
     enqueue(socket);
     matchQueues();
 
-    // Requeue the partner if still connected
+    // Requeue the partner separately — they were notified, now put them back in queue
     const partnerSocket = io.sockets.sockets.get(partnerId);
     if (partnerSocket && !partnerSocket.data.roomId) {
       partnerSocket.data.hasJoined = false;
