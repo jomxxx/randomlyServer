@@ -33,7 +33,7 @@ const SECURITY_CONFIG = {
   MAX_REJOIN_ATTEMPTS: 5,
   INACTIVITY_TIMEOUT_MS: 300000,    // 5 minutes
   RATE_LIMIT_WINDOW: 1000,          // 1 second
-  MIN_MATCH_TIME_MS: 8000,
+  MIN_MATCH_TIME_MS: 0,
   MAP_CLEANUP_INTERVAL_MS: 60000,   // FIX: clean stale map entries every 60s
 };
 
@@ -420,36 +420,44 @@ io.on("connection", (socket) => {
     updateActivity(socket);
     const roomId = socket.data.roomId;
 
+    // Not in a room — make sure they are queued
     if (!roomId) {
-      // Already searching, do nothing
-      return;
-    }
-
-    if (Date.now() - (socket.data.lastMatchedAt || 0) < SECURITY_CONFIG.MIN_MATCH_TIME_MS) {
-      socket.emit("match-error", { message: "Please wait a few seconds before skipping." });
+      if (!socket.data.inQueue) {
+        socket.data.hasJoined = false;
+        enqueue(socket);
+        matchQueues();
+      }
       return;
     }
 
     const info = rooms.get(roomId);
-    if (!info) return;
+    if (!info) {
+      // Room already gone, just requeue initiator
+      socket.data.hasJoined = false;
+      enqueue(socket);
+      matchQueues();
+      return;
+    }
 
     const partnerId = info.a === socket.id ? info.b : info.a;
 
-    // Teardown notifies the partner with correct message, does NOT requeue them
+    // Notify partner with the correct disconnect message, clean up room
     teardownRoom(roomId, "skipped", socket.id);
 
-    // Requeue the initiator (the one who clicked Find Next)
+    // Requeue the initiator immediately
     socket.data.hasJoined = false;
     enqueue(socket);
     matchQueues();
 
-    // Requeue the partner separately — they were notified, now put them back in queue
-    const partnerSocket = io.sockets.sockets.get(partnerId);
-    if (partnerSocket && !partnerSocket.data.roomId) {
-      partnerSocket.data.hasJoined = false;
-      enqueue(partnerSocket);
-      matchQueues();
-    }
+    // Requeue the partner after short delay so their UI shows the message first
+    setTimeout(() => {
+      const partnerSocket = io.sockets.sockets.get(partnerId);
+      if (partnerSocket && !partnerSocket.data.roomId && !partnerSocket.data.inQueue) {
+        partnerSocket.data.hasJoined = false;
+        enqueue(partnerSocket);
+        matchQueues();
+      }
+    }, 1500);
   });
 
   // ── REPORT ────────────────────────────────────────────────
