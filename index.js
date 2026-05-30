@@ -1,30 +1,54 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const helmet = require("helmet");
 
 const PORT = process.env.PORT || 3001;
 
 const app = express();
 
-// ── Security headers via helmet ────────────────────────────────
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      connectSrc: ["'self'", "wss:", "ws:"],
-      frameSrc: ["'none'"],
-      objectSrc: ["'none'"],
-    },
-  },
-  crossOriginEmbedderPolicy: false,
-}));
-
-// Block dotfiles and sensitive paths
+// ── Explicitly set ALL security headers on every HTTP response ──
 app.use((req, res, next) => {
-  const blocked = ["/admin", "/login", "/wp-admin", "/wp-login.php", "/.env", "/.git"];
-  const path = req.path.toLowerCase();
-  if (blocked.some((b) => path === b || path.startsWith(b + "/"))) {
+  // 1. Content Security Policy — prevents XSS and code injection
+  res.setHeader(
+    "Content-Security-Policy",
+    [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline'",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "font-src 'self' https://fonts.gstatic.com",
+      "img-src 'self' data: blob:",
+      "connect-src 'self' wss: ws: https://randomlyserver-production.up.railway.app",
+      "frame-src 'none'",
+      "frame-ancestors 'none'",
+      "object-src 'none'",
+      "base-uri 'self'",
+    ].join("; ")
+  );
+  // 2. Clickjacking protection
+  res.setHeader("X-Frame-Options", "DENY");
+  // 3. MIME sniffing protection
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  // 4. Referrer privacy
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  // 5. Lock down unused browser APIs
+  res.setHeader("Permissions-Policy", "geolocation=(), camera=(), microphone=(), payment=(), usb=()");
+  // 6. Force HTTPS for 1 year
+  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
+  // 7. Legacy XSS filter
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  // 8. Remove server fingerprint
+  res.removeHeader("X-Powered-By");
+  next();
+});
+
+// ── Block sensitive/admin paths ────────────────────────────────
+app.use((req, res, next) => {
+  const BLOCKED = [
+    "/admin", "/login", "/wp-admin", "/wp-login.php",
+    "/.env", "/.git", "/.htaccess", "/config",
+  ];
+  const p = req.path.toLowerCase();
+  if (BLOCKED.some((b) => p === b || p.startsWith(b + "/"))) {
     return res.status(404).json({ error: "Not found" });
   }
   next();
