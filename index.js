@@ -1,10 +1,35 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
+const helmet = require("helmet");
 
 const PORT = process.env.PORT || 3001;
 
 const app = express();
+
+// ── Security headers via helmet ────────────────────────────────
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      connectSrc: ["'self'", "wss:", "ws:"],
+      frameSrc: ["'none'"],
+      objectSrc: ["'none'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+}));
+
+// Block dotfiles and sensitive paths
+app.use((req, res, next) => {
+  const blocked = ["/admin", "/login", "/wp-admin", "/wp-login.php", "/.env", "/.git"];
+  const path = req.path.toLowerCase();
+  if (blocked.some((b) => path === b || path.startsWith(b + "/"))) {
+    return res.status(404).json({ error: "Not found" });
+  }
+  next();
+});
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*" },
@@ -516,7 +541,7 @@ function tryMatch(socket) {
 }
 
 // ===== ROUTES =====
-app.get("/", (req, res) => res.send("Randoomly server running"));
+app.get("/", (req, res) => res.status(200).json({ status: "ok" }));
 
 // Health + stats endpoint — useful for monitoring
 app.get("/stats", (req, res) => {
