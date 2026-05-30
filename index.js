@@ -10,20 +10,21 @@ const app = express();
 app.use((req, res, next) => {
   // 1. Content Security Policy — prevents XSS and code injection
   res.setHeader(
-    "Content-Security-Policy",
-    [
-      "default-src 'self'",
-      "script-src 'self' 'unsafe-inline'",
-      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-      "font-src 'self' https://fonts.gstatic.com",
-      "img-src 'self' data: blob:",
-      "connect-src 'self' wss: ws: https://randomlyserver-production.up.railway.app",
-      "frame-src 'none'",
-      "frame-ancestors 'none'",
-      "object-src 'none'",
-      "base-uri 'self'",
-    ].join("; ")
-  );
+  "Content-Security-Policy",
+  [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data: blob:",
+    "connect-src 'self' wss: ws: https://randomlyserver-production.up.railway.app",
+    "frame-src 'none'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "upgrade-insecure-requests"
+  ].join("; ")
+);
   // 2. Clickjacking protection
   res.setHeader("X-Frame-Options", "DENY");
   // 3. MIME sniffing protection
