@@ -10,21 +10,20 @@ const app = express();
 app.use((req, res, next) => {
   // 1. Content Security Policy — prevents XSS and code injection
   res.setHeader(
-  "Content-Security-Policy",
-  [
-    "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-    "font-src 'self' https://fonts.gstatic.com",
-    "img-src 'self' data: blob:",
-    "connect-src 'self' wss: ws: https://randomlyserver-production.up.railway.app",
-    "frame-src 'none'",
-    "frame-ancestors 'none'",
-    "object-src 'none'",
-    "base-uri 'self'",
-    "upgrade-insecure-requests"
-  ].join("; ")
-);
+    "Content-Security-Policy",
+    [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline'",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "font-src 'self' https://fonts.gstatic.com",
+      "img-src 'self' data: blob:",
+      "connect-src 'self' wss: ws: https://randomlyserver-production.up.railway.app",
+      "frame-src 'none'",
+      "frame-ancestors 'none'",
+      "object-src 'none'",
+      "base-uri 'self'",
+    ].join("; ")
+  );
   // 2. Clickjacking protection
   res.setHeader("X-Frame-Options", "DENY");
   // 3. MIME sniffing protection
@@ -64,6 +63,26 @@ const io = new Server(server, {
 const maleQueue = [];
 const femaleQueue = [];
 const rooms = new Map(); // roomId -> { a, b }
+
+// ── Keep-Chatting Token Store ──────────────────────────────────
+// token -> { aSocketId, bSocketId, aGender, bGender, aWant, bWant, aAvatar, bAvatar, expiresAt }
+const keepTokens = new Map();
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function generateToken() {
+  // 6-digit numeric code
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function cleanExpiredTokens() {
+  const now = Date.now();
+  for (const [token, data] of keepTokens.entries()) {
+    if (now > data.expiresAt) keepTokens.delete(token);
+  }
+}
+
+// Clean expired tokens every 30 minutes
+setInterval(cleanExpiredTokens, 30 * 60 * 1000);
 
 // ===== SECURITY TRACKING =====
 const ipConnectionMap = new Map();   // IP -> { count, lastConnection }
@@ -531,6 +550,92 @@ io.on("connection", (socket) => {
   });
 
   // ── LEAVE ─────────────────────────────────────────────────
+  // ── SAVE CHAT (request a keep-chatting token) ────────────────
+  socket.on("save-chat", () => {
+    const roomId = socket.data.roomId;
+    if (!roomId) return;
+
+    const info = rooms.get(roomId);
+    if (!info) return;
+
+    const partnerId = info.a === socket.id ? info.b : info.a;
+    const partnerSocket = io.sockets.sockets.get(partnerId);
+    if (!partnerSocket) return;
+
+    // Generate unique token
+    let token;
+    let attempts = 0;
+    do {
+      token = generateToken();
+      attempts++;
+    } while (keepTokens.has(token) && attempts < 10);
+
+    keepTokens.set(token, {
+      aSocketId: socket.id,
+      bSocketId: partnerId,
+      aGender: socket.data.gender,
+      bGender: partnerSocket.data.gender,
+      aWant: socket.data.want,
+      bWant: partnerSocket.data.want,
+      aAvatar: socket.data.avatar,
+      bAvatar: partnerSocket.data.avatar,
+      expiresAt: Date.now() + TOKEN_TTL_MS,
+    });
+
+    // Send token to BOTH users
+    socket.emit("chat-token", { token });
+    partnerSocket.emit("chat-token", { token });
+
+    console.log(`[save-chat] token=${token} for room=${roomId}`);
+  });
+
+  // ── REJOIN WITH TOKEN ─────────────────────────────────────────
+  socket.on("rejoin-chat", ({ token, gender, avatar }) => {
+    cleanExpiredTokens();
+
+    if (!token || !keepTokens.has(token)) {
+      socket.emit("rejoin-error", { message: "Invalid or expired code. Please check and try again." });
+      return;
+    }
+
+    const data = keepTokens.get(token);
+
+    // Check if the other user is already waiting with this token
+    const otherSocketId = data.waitingSocketId;
+    if (!otherSocketId) {
+      // First user to rejoin — store their socketId and wait
+      data.waitingSocketId = socket.id;
+      data.waitingAvatar = avatar || data.aAvatar;
+      socket.data.gender = gender || data.aGender;
+      socket.data.avatar = avatar || data.aAvatar;
+      socket.data.want = data.aWant;
+      keepTokens.set(token, data);
+      socket.emit("rejoin-waiting", { message: "Code valid! Waiting for the other person to join..." });
+      console.log(`[rejoin-chat] first user waiting token=${token}`);
+      return;
+    }
+
+    // Second user — match them together immediately
+    const otherSocket = io.sockets.sockets.get(otherSocketId);
+    if (!otherSocket) {
+      socket.emit("rejoin-error", { message: "The other person disconnected. Code is no longer valid." });
+      keepTokens.delete(token);
+      return;
+    }
+
+    // Set socket data for second user
+    socket.data.gender = gender || data.bGender;
+    socket.data.avatar = avatar || data.bAvatar;
+    socket.data.want = data.bWant;
+
+    // Clean up token — single use
+    keepTokens.delete(token);
+
+    // Create a room for them
+    createRoom(otherSocket, socket);
+    console.log(`[rejoin-chat] matched via token=${token}`);
+  });
+
   socket.on("leave", () => {
     const roomId = socket.data.roomId;
     if (roomId) {
