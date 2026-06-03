@@ -465,7 +465,7 @@ io.on("connection", (socket) => {
     const rId = socket.data.roomId;
     if (!rId || typeof text !== "string") return;
 
-    // FIX: enforce message length limit
+    // Enforce message length limit
     if (text.length > SECURITY_CONFIG.MAX_MESSAGE_LENGTH) {
       socket.emit("rate-limit", { message: "Message too long (max 500 characters)." });
       return;
@@ -477,6 +477,45 @@ io.on("connection", (socket) => {
     }
 
     socket.to(rId).emit("message", { from: socket.id, text });
+  });
+
+  // ── IMAGE MESSAGE ─────────────────────────────────────────
+  socket.on("image-message", ({ imageData, mimeType }) => {
+    updateActivity(socket);
+    const rId = socket.data.roomId;
+    if (!rId) return;
+
+    // Validate mime type — only allow images
+    const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+    if (!ALLOWED_TYPES.includes(mimeType)) {
+      socket.emit("rate-limit", { message: "Only JPEG, PNG, GIF, and WebP images are allowed." });
+      return;
+    }
+
+    // Validate base64 string
+    if (typeof imageData !== "string" || !imageData.startsWith("data:image/")) {
+      return;
+    }
+
+    // Enforce max size — base64 of 2MB image is ~2.7MB string
+    const MAX_BASE64_LENGTH = 3 * 1024 * 1024; // ~3MB
+    if (imageData.length > MAX_BASE64_LENGTH) {
+      socket.emit("rate-limit", { message: "Image too large. Max size is 2MB." });
+      return;
+    }
+
+    // Rate limit images same as messages
+    if (!trackMessageRate(socket.id)) {
+      socket.emit("rate-limit", { message: "Slow down — too many messages." });
+      return;
+    }
+
+    // Relay to partner only — never stored
+    socket.to(rId).emit("image-message", {
+      from: socket.id,
+      imageData,
+      mimeType,
+    });
   });
 
   // ── TYPING ────────────────────────────────────────────────
