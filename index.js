@@ -526,6 +526,15 @@ io.on("connection", (socket) => {
     socket.to(rId).emit("typing", { from: socket.id, typing });
   });
 
+  // ── IMAGE UPLOADING STATUS ────────────────────────────────
+  // Tells partner "image is on the way" before the large payload arrives
+  socket.on("image-uploading", ({ uploading }) => {
+    updateActivity(socket);
+    const rId = socket.data.roomId;
+    if (!rId) return;
+    socket.to(rId).emit("image-uploading", { uploading: !!uploading });
+  });
+
   // ── NEXT ──────────────────────────────────────────────────
   socket.on("next", () => {
     updateActivity(socket);
