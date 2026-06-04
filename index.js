@@ -22,7 +22,7 @@ app.use((req, res, next) => {
       "frame-ancestors 'none'",
       "object-src 'none'",
       "base-uri 'self'",
-    ].join("; "),
+    ].join("; ")
   );
   // 2. Clickjacking protection
   res.setHeader("X-Frame-Options", "DENY");
@@ -31,15 +31,9 @@ app.use((req, res, next) => {
   // 4. Referrer privacy
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   // 5. Lock down unused browser APIs
-  res.setHeader(
-    "Permissions-Policy",
-    "geolocation=(), camera=(), microphone=(), payment=(), usb=()",
-  );
+  res.setHeader("Permissions-Policy", "geolocation=(), camera=(), microphone=(), payment=(), usb=()");
   // 6. Force HTTPS for 1 year
-  res.setHeader(
-    "Strict-Transport-Security",
-    "max-age=31536000; includeSubDomains; preload",
-  );
+  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
   // 7. Legacy XSS filter
   res.setHeader("X-XSS-Protection", "1; mode=block");
   // 8. Remove server fingerprint
@@ -50,14 +44,8 @@ app.use((req, res, next) => {
 // ── Block sensitive/admin paths ────────────────────────────────
 app.use((req, res, next) => {
   const BLOCKED = [
-    "/admin",
-    "/login",
-    "/wp-admin",
-    "/wp-login.php",
-    "/.env",
-    "/.git",
-    "/.htaccess",
-    "/config",
+    "/admin", "/login", "/wp-admin", "/wp-login.php",
+    "/.env", "/.git", "/.htaccess", "/config",
   ];
   const p = req.path.toLowerCase();
   if (BLOCKED.some((b) => p === b || p.startsWith(b + "/"))) {
@@ -69,7 +57,10 @@ app.use((req, res, next) => {
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 5 * 1024 * 1024, // 5MB buffer for large images
+  maxHttpBufferSize: 4 * 1024 * 1024,  // 4MB — enough for compressed images
+  pingTimeout: 60000,                   // 60s — prevents disconnect during upload
+  pingInterval: 25000,
+  connectTimeout: 45000,
 });
 
 // ===== QUEUES =====
@@ -98,26 +89,25 @@ function cleanExpiredTokens() {
 setInterval(cleanExpiredTokens, 30 * 60 * 1000);
 
 // ===== SECURITY TRACKING =====
-const ipConnectionMap = new Map(); // IP -> { count, lastConnection }
-const abuseTracker = new Map(); // IP -> { reportCount, blockedUntil }
+const ipConnectionMap = new Map();   // IP -> { count, lastConnection }
+const abuseTracker = new Map();      // IP -> { reportCount, blockedUntil }
 const messageRateLimiter = new Map(); // socketId -> { count, resetTime, violations }
-const rejoinTracker = new Map(); // IP -> { count, resetTime }
+const rejoinTracker = new Map();     // IP -> { count, resetTime }
 const inactivityTracker = new Map(); // socketId -> lastActivityTime
 
 const SECURITY_CONFIG = {
   MAX_CONNECTIONS_PER_IP: 5,
   IP_COOLDOWN_MS: 2000,
   MESSAGES_PER_SECOND: 10,
-  MAX_MESSAGE_LENGTH: 500, // FIX: prevent huge messages
+  MAX_MESSAGE_LENGTH: 500,          // FIX: prevent huge messages
   ABUSE_REPORT_THRESHOLD: 3,
-  ABUSE_BLOCK_DURATION: 300000, // 5 minutes
+  ABUSE_BLOCK_DURATION: 300000,     // 5 minutes
   REJOIN_COOLDOWN_MS: 3000,
   MAX_REJOIN_ATTEMPTS: 5,
-  INACTIVITY_TIMEOUT_MS: 300000, // 5 minutes
-  RATE_LIMIT_WINDOW: 1000, // 1 second
+  INACTIVITY_TIMEOUT_MS: 300000,    // 5 minutes
+  RATE_LIMIT_WINDOW: 1000,          // 1 second
   MIN_MATCH_TIME_MS: 0,
-  MAP_CLEANUP_INTERVAL_MS: 60000, // FIX: clean stale map entries every 60s
-  MAX_BASE64_IMAGE_LENGTH: 2.8 * 1024 * 1024, // ~2.8MB safe limit
+  MAP_CLEANUP_INTERVAL_MS: 60000,   // FIX: clean stale map entries every 60s
 };
 
 // ===== HELPERS =====
@@ -282,9 +272,7 @@ function enqueue(socket) {
   if (!queue.includes(id)) queue.push(id);
   socket.data.lastMatchRequest = Date.now();
   socket.data.inQueue = true;
-  console.log(
-    `[enqueue] ${id} (${socket.data.gender}) — male=${maleQueue.length} female=${femaleQueue.length}`,
-  );
+  console.log(`[enqueue] ${id} (${socket.data.gender}) — male=${maleQueue.length} female=${femaleQueue.length}`);
   socket.emit("waiting");
   broadcastQueueStats();
 }
@@ -297,23 +285,15 @@ function matchQueues() {
     for (let i = 0; i < maleQueue.length; i++) {
       const aId = maleQueue[i];
       const a = io.sockets.sockets.get(aId);
-      if (!a) {
-        removeFromQueue(maleQueue, aId);
-        continue;
-      }
+      if (!a) { removeFromQueue(maleQueue, aId); continue; }
 
       for (let j = 0; j < femaleQueue.length; j++) {
         const bId = femaleQueue[j];
         const b = io.sockets.sockets.get(bId);
-        if (!b) {
-          removeFromQueue(femaleQueue, bId);
-          continue;
-        }
+        if (!b) { removeFromQueue(femaleQueue, bId); continue; }
 
-        const aAcceptsB =
-          a.data?.want === "any" || a.data?.want === b.data?.gender;
-        const bAcceptsA =
-          b.data?.want === "any" || b.data?.want === a.data?.gender;
+        const aAcceptsB = a.data?.want === "any" || a.data?.want === b.data?.gender;
+        const bAcceptsA = b.data?.want === "any" || b.data?.want === a.data?.gender;
 
         if (aAcceptsB && bAcceptsA) {
           // FIX: remove each socket from their own correct queue only
@@ -351,16 +331,8 @@ function createRoom(aSocket, bSocket) {
   bSocket.data.lastMatchedAt = now;
   bSocket.data.inQueue = false;
 
-  aSocket.emit("matched", {
-    roomId,
-    partnerId: bSocket.id,
-    partnerAvatar: bSocket.data.avatar,
-  });
-  bSocket.emit("matched", {
-    roomId,
-    partnerId: aSocket.id,
-    partnerAvatar: aSocket.data.avatar,
-  });
+  aSocket.emit("matched", { roomId, partnerId: bSocket.id, partnerAvatar: bSocket.data.avatar });
+  bSocket.emit("matched", { roomId, partnerId: aSocket.id, partnerAvatar: aSocket.data.avatar });
 }
 
 function teardownRoom(roomId, reason, initiatorId = null) {
@@ -371,9 +343,7 @@ function teardownRoom(roomId, reason, initiatorId = null) {
   const bSocket = io.sockets.sockets.get(info.b);
 
   rooms.delete(roomId);
-  console.log(
-    `[teardownRoom] room=${roomId} reason=${reason} initiator=${initiatorId}`,
-  );
+  console.log(`[teardownRoom] room=${roomId} reason=${reason} initiator=${initiatorId}`);
 
   if (initiatorId) {
     const otherId = info.a === initiatorId ? info.b : info.a;
@@ -402,14 +372,12 @@ function teardownRoom(roomId, reason, initiatorId = null) {
       } else if (reason === "left") {
         other.emit("partner-left", {
           reason,
-          message:
-            "⚠️ Stranger left the chat — click Find Next to meet someone new.",
+          message: "⚠️ Stranger left the chat — click Find Next to meet someone new.",
         });
       } else {
         other.emit("partner-left", {
           reason,
-          message:
-            "⚠️ Stranger disconnected — click Find Next to meet someone new.",
+          message: "⚠️ Stranger disconnected — click Find Next to meet someone new.",
         });
       }
     }
@@ -431,17 +399,13 @@ io.on("connection", (socket) => {
   const ip = getClientIp(socket);
 
   if (isIpBlocked(ip)) {
-    socket.emit("blocked", {
-      message: "This IP is temporarily blocked due to abuse reports.",
-    });
+    socket.emit("blocked", { message: "This IP is temporarily blocked due to abuse reports." });
     socket.disconnect(true);
     return;
   }
 
   if (!trackConnectionAttempt(ip)) {
-    socket.emit("match-error", {
-      message: "Too many connection attempts. Please wait a moment.",
-    });
+    socket.emit("match-error", { message: "Too many connection attempts. Please wait a moment." });
     socket.disconnect(true);
     return;
   }
@@ -471,9 +435,7 @@ io.on("connection", (socket) => {
     const ip = getClientIp(socket);
 
     if (isIpBlocked(ip)) {
-      socket.emit("blocked", {
-        message: "This IP is temporarily blocked due to abuse reports.",
-      });
+      socket.emit("blocked", { message: "This IP is temporarily blocked due to abuse reports." });
       socket.disconnect(true);
       return;
     }
@@ -484,23 +446,18 @@ io.on("connection", (socket) => {
     }
 
     if (socket.data.hasJoined) {
-      socket.emit("match-error", {
-        message: "You are already queued. Please wait for a match.",
-      });
+      socket.emit("match-error", { message: "You are already queued. Please wait for a match." });
       return;
     }
 
     if (!trackRejoinAttempt(ip)) {
-      socket.emit("match-error", {
-        message: "Too many quick reconnects. Please wait before trying again.",
-      });
+      socket.emit("match-error", { message: "Too many quick reconnects. Please wait before trying again." });
       return;
     }
 
     socket.data.hasJoined = true;
     socket.data.gender = gender === "female" ? "female" : "male";
-    socket.data.want =
-      want === "female" ? "female" : want === "male" ? "male" : "any";
+    socket.data.want = want === "female" ? "female" : want === "male" ? "male" : "any";
     socket.data.avatar = avatar || null;
 
     tryMatch(socket);
@@ -514,16 +471,12 @@ io.on("connection", (socket) => {
 
     // Enforce message length limit
     if (text.length > SECURITY_CONFIG.MAX_MESSAGE_LENGTH) {
-      socket.emit("rate-limit", {
-        message: "Message too long (max 500 characters).",
-      });
+      socket.emit("rate-limit", { message: "Message too long (max 500 characters)." });
       return;
     }
 
     if (!trackMessageRate(socket.id)) {
-      socket.emit("rate-limit", {
-        message: "Slow down — messages are limited to prevent spam.",
-      });
+      socket.emit("rate-limit", { message: "Slow down — messages are limited to prevent spam." });
       return;
     }
 
@@ -536,46 +489,37 @@ io.on("connection", (socket) => {
     const rId = socket.data.roomId;
     if (!rId) return;
 
-    // Validate mime type — only JPEG (client always converts to JPEG)
+    // Client canvas always compresses to JPEG — reject anything else
     if (mimeType !== "image/jpeg") {
+      socket.emit("rate-limit", { message: "Invalid image format." });
+      return;
+    }
+
+    // Validate base64 format
+    if (typeof imageData !== "string" || !imageData.startsWith("data:image/jpeg;base64,")) {
+      socket.emit("rate-limit", { message: "Invalid image data." });
+      return;
+    }
+
+    // Byte-level size check — base64 string length * 0.75 = actual bytes
+    // This prevents the socket from disconnecting on oversized payloads
+    const actualBytes = imageData.length * 0.75;
+    const MAX_BYTES = 2 * 1024 * 1024; // 2MB
+    if (actualBytes > MAX_BYTES) {
       socket.emit("rate-limit", {
-        message: "Invalid image format. Only JPEG images are supported.",
+        message: "Image too large. Please use a smaller image.",
       });
       return;
     }
 
-    // Validate base64 string
-    if (
-      typeof imageData !== "string" ||
-      !imageData.startsWith("data:image/jpeg")
-    ) {
-      socket.emit("rate-limit", { message: "Invalid image data format." });
-      return;
-    }
-
-    // Enforce max base64 size
-    if (imageData.length > SECURITY_CONFIG.MAX_BASE64_IMAGE_LENGTH) {
-      socket.emit("rate-limit", {
-        message:
-          "Image too large. Compression failed. Please use a smaller image.",
-      });
-      return;
-    }
-
-    // Rate limit images same as messages (max 10 per second)
+    // Rate limit
     if (!trackMessageRate(socket.id)) {
-      socket.emit("rate-limit", {
-        message: "Too many images. Please slow down.",
-      });
+      socket.emit("rate-limit", { message: "Sending too fast. Please slow down." });
       return;
     }
 
-    // Relay to partner only — never stored
-    socket.to(rId).emit("image-message", {
-      from: socket.id,
-      imageData,
-      mimeType,
-    });
+    // Relay to partner — never stored
+    socket.to(rId).emit("image-message", { from: socket.id, imageData, mimeType });
   });
 
   // ── TYPING ────────────────────────────────────────────────
@@ -593,17 +537,6 @@ io.on("connection", (socket) => {
     const rId = socket.data.roomId;
     if (!rId) return;
     socket.to(rId).emit("image-uploading", { uploading: !!uploading });
-  });
-
-  // ── REACTION ───────────────────────────────────────────────
-  socket.on("reaction", ({ messageIndex, emoji }) => {
-    updateActivity(socket);
-    const rId = socket.data.roomId;
-    if (!rId || typeof messageIndex !== "number") return;
-    socket.to(rId).emit("reaction", {
-      messageIndex,
-      emoji: emoji || null,
-    });
   });
 
   // ── NEXT ──────────────────────────────────────────────────
@@ -662,13 +595,8 @@ io.on("connection", (socket) => {
     });
 
     if (reportEntry.blockedUntil) {
-      reportedSocket.emit("reported", {
-        reportCount: reportEntry.reportCount,
-        blocked: true,
-      });
-      reportedSocket.emit("match-error", {
-        message: "You have been temporarily blocked due to reports.",
-      });
+      reportedSocket.emit("reported", { reportCount: reportEntry.reportCount, blocked: true });
+      reportedSocket.emit("match-error", { message: "You have been temporarily blocked due to reports." });
       reportedSocket.disconnect(true);
     }
   });
@@ -718,9 +646,7 @@ io.on("connection", (socket) => {
     cleanExpiredTokens();
 
     if (!token || !keepTokens.has(token)) {
-      socket.emit("rejoin-error", {
-        message: "Invalid or expired code. Please check and try again.",
-      });
+      socket.emit("rejoin-error", { message: "Invalid or expired code. Please check and try again." });
       return;
     }
 
@@ -736,9 +662,7 @@ io.on("connection", (socket) => {
       socket.data.avatar = avatar || data.aAvatar;
       socket.data.want = data.aWant;
       keepTokens.set(token, data);
-      socket.emit("rejoin-waiting", {
-        message: "Code valid! Waiting for the other person to join...",
-      });
+      socket.emit("rejoin-waiting", { message: "Code valid! Waiting for the other person to join..." });
       console.log(`[rejoin-chat] first user waiting token=${token}`);
       return;
     }
@@ -746,9 +670,7 @@ io.on("connection", (socket) => {
     // Second user — match them together immediately
     const otherSocket = io.sockets.sockets.get(otherSocketId);
     if (!otherSocket) {
-      socket.emit("rejoin-error", {
-        message: "The other person disconnected. Code is no longer valid.",
-      });
+      socket.emit("rejoin-error", { message: "The other person disconnected. Code is no longer valid." });
       keepTokens.delete(token);
       return;
     }
@@ -810,9 +732,7 @@ app.get("/stats", (req, res) => {
     activeRooms: rooms.size,
     maleQueue: maleQueue.length,
     femaleQueue: femaleQueue.length,
-    blockedIps: [...abuseTracker.values()].filter(
-      (e) => e.blockedUntil > Date.now(),
-    ).length,
+    blockedIps: [...abuseTracker.values()].filter((e) => e.blockedUntil > Date.now()).length,
   });
 });
 
