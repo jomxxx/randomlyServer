@@ -17,7 +17,7 @@ app.use((req, res, next) => {
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com",
       "img-src 'self' data: blob:",
-      "connect-src 'self' wss: ws: https://randomlyserver-production.up.railway.app",
+      "connect-src 'self' wss: ws: randomlyserver-production-574b7ebd.up.railway.app",
       "frame-src 'none'",
       "frame-ancestors 'none'",
       "object-src 'none'",
